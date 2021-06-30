@@ -1,0 +1,455 @@
+<?php
+
+use bomberjam\Constants;
+use bomberjam\Game;
+use bomberjam\Logger;
+
+spl_autoload_register(function ($className) {
+    require str_replace('\\', DIRECTORY_SEPARATOR, ltrim($className, '\\')) . '.php';
+});
+
+$allActions = [
+    Constants::ACTION_UP,
+    Constants::ACTION_RIGHT,
+    Constants::ACTION_DOWN,
+    Constants::ACTION_LEFT,
+    Constants::ACTION_STAY,
+    Constants::ACTION_BOMB
+];
+
+$allObstacles = [
+	"endGrid" => 1,
+	"destroyable_block" => 2,
+	"undestroyable_block" => 3,
+	"exploding_bomb" => 4,
+	"bomb" => 5,
+	"opponent" => 6 
+];
+
+// Standard output (print) can ONLY BE USED to communicate with the bomberjam process
+// Use text files if you need to log something for debugging
+$logger = new Logger();
+
+if (isset($argv)) {
+    foreach ($argv as $arg) {
+        // Edit run_game.(bat|sh) to include file logging for any of the four bot processes: php MyBot.php --logging
+        if ('--logging' === strtolower($arg)) {
+            $logger->setup('log-' . round(microtime(true) * 1000) . '.log');
+            break;
+        }
+    }
+}
+
+$game = new Game();
+
+// 1) You must send an alphanumerical name up to 32 characters
+// Spaces or special characters are not allowed
+$game->ready('0:Alberto03' . rand(1000, 9999));
+$logger->info('My player ID is ' . $game->myPlayerId);
+
+$logger->info('my position ' . $game->myPlayer->x.' '.$game->myPlayer->y);
+
+do {
+    // 2) Each tick, you'll receive the current game state serialized as JSON
+    // From this moment, you have a limited time to send an action back to the bomberjam process through stdout
+    $game->receiveCurrentState();
+	
+    try {
+		$map = [];
+		$bombs = [];
+		$opponents = [];
+		$bonuses = [];
+        // 3) Analyze the current state and decide what to do
+        for ($x = 0; $x < $game->state->width; $x++) {
+            for ($y = 0; $y < $game->state->height; $y++) {
+				
+                $tile = $game->state->getTileAt($x, $y);
+                if ($tile === Constants::TILE_BLOCK) {
+                    // TODO found a block to destroy
+                }
+
+                $otherPlayer = $game->state->findAlivePlayerAt($x, $y);
+                if (!is_null($otherPlayer) && $otherPlayer->id !== $game->myPlayerId) {
+                    // TODO found an alive opponent
+					$opponents[$x][$y] = 1;
+                }
+
+                $bomb = $game->state->findActiveBombAt($x, $y);
+                if (!is_null($bomb)) {
+                    // TODO found an active bomb
+					$bombs[$x][$y] = 1;
+                }
+
+                $bonus = $game->state->findDroppedBonusAt($x, $y);
+                if (!is_null($bonus)) {
+                    // TODO found a bonus
+					$bonuses[$x][$y] = 1;
+                }
+				
+				$map[$x][$y] = $tile;
+            }
+        }
+		
+		$myPositionX = $game->myPlayer->x;
+		$myPositionY = $game->myPlayer->y;
+		
+		$action = null;
+		$nextActionInfo = getNextAction(
+			$myPositionX, 
+			$myPositionY, 
+			$game, 
+			$map, 
+			$bombs,
+			$opponents, 
+			$bonuses,
+			$allObstacles,
+			$allActions,
+			$logger
+		);
+		
+		$action = $nextActionInfo['action'];
+
+		//TODO seeTheFuture. calc next step and see if in that path there is a bomb in sight. If so, exclude the step and re-elaborate next step
+		
+		/**
+		 * 1) analize elaborated action. If is a step in X direction, calc coordinates of that step. If is not a step, no further operation required
+		 * 2) with the coordinates of next step, check if there is a bomb in sight, his direction and how much steps to reach it.
+		 * 3) if there is a bomb, get Bomb object with the coordinates you have.
+		 * 4) Check his range, and if the path will explode, or if the path is not reached by the explosion
+		 * 5) No path explosion? Go further. Bomb will blow up my player? So the direction of the action do not have to be taken: calc new action, passing the direction to avoid in the parameter function
+		 */
+		$isAMoveAction = key($action) < 4;
+
+		if($isAMoveAction){
+			$newCoordinates = [$myPositionX, $myPositionY];
+			switch($action)
+			{
+				case 0:	//up
+					$newCoordinates[1]--;
+					break;
+				case 1: //right
+					$newCoordinates[0]++;
+					break;
+				case 2: //down 
+					$newCoordinates[1]++;
+					break;
+				case 3: //left
+					$newCoordinates[0]--;
+					break;
+			}
+
+			$bombInSight = getNextAction(
+				$newCoordinates[0], 
+				$newCoordinates[1], 
+				$game, 
+				$map, 
+				$bombs,
+				$opponents, 
+				$bonuses,
+				$allObstacles,
+				$allActions,
+				$logger
+			);
+
+			$thereIsABomb = $bombInSight['thereIsABomb'];
+			
+			if($thereIsABomb){
+				$obstacleDirections = array_keys($bombInSight['typeOfObstacle'], $allObstacles["bomb"]);
+				$bombDirection = $obstacleDirections[0];
+				$stepsToBomb = $bombInSight['moveAvailable'][$bombDirection];
+
+				switch($bombDirection){
+					case 0:	//up
+						$newCoordinates[1] = $newCoordinates[1] - $stepsToBomb;
+						break;
+					case 1: //right
+						$newCoordinates[0] = $newCoordinates[0] + $stepsToBomb;
+						break;
+					case 2: //down 
+						$newCoordinates[1] = $newCoordinates[1] + $stepsToBomb;
+						break;
+					case 3: //left
+						$newCoordinates[0] = $newCoordinates[0] - $stepsToBomb;
+						break;
+				}
+
+				$bombToAvoid = $game->state->findActiveBombAt($newCoordinates[0], $newCoordinates[1]);
+				$bombRange = $bombToAvoid->range;
+
+				$logger->info("bomb direction: ".$bombDirection."; steps to bomb: ".$stepsToBomb."; bomb range: ".$bombRange);
+			}
+
+		}
+
+
+		//calc new position. Check for bombs 
+
+
+		//TODO check if suddenDeath is active and avoid borders
+
+		
+        if ($game->myPlayer->bombsLeft > 0) {
+            // TODO you can drop a bomb
+        }
+        
+		// 4) Send your action
+		$action = !empty($action) ? $action : $allActions[array_rand($allActions)];
+
+        $game->sendAction($action);
+        $logger->info('Tick ' . $game->state->tick . ', sent ' . $action);
+    } catch (Exception $ex) {
+        // Handle your exceptions per tick
+        $logger->error('Tick ' . $game->state->tick . ', exception: ' . $ex->getTraceAsString());
+    }
+
+} while ($game->myPlayer->isAlive && !$game->state->isFinished);
+
+
+
+
+function getNextAction($myPositionX, $myPositionY, $game, $map, $bombs, $opponents, $bonuses, $allObstacles, $allActions, $logger)
+{
+	$thereIsABomb = false;
+	$coordinatesInfo = getCoordinatesInfo($myPositionX, $myPositionY, $game, $map, $bombs, $opponents, $bonuses);
+	$typeOfObstacle = $coordinatesInfo["typeOfObstacle"];
+	$moveAvailable = $coordinatesInfo["moveAvailable"];
+
+	if(in_array($allObstacles["bomb"], $typeOfObstacle) || $game->state->findActiveBombAt($myPositionX, $myPositionY)) //bomb discovered
+	{
+		$action = runFromBomb($moveAvailable, $typeOfObstacle, $allActions, $allObstacles, $game, $logger);
+		$thereIsABomb = true;
+	}
+	elseif(in_array($allObstacles["opponent"], $typeOfObstacle)) //opponent discovered 
+	{
+		$action = huntOpponent($moveAvailable, $typeOfObstacle, $allActions, $allObstacles, $logger);
+	}
+	elseif(in_array($allObstacles["destroyable_block"], $typeOfObstacle)) //destroyable block discovered
+	{
+		$action = destroyBlock($moveAvailable, $typeOfObstacle, $allActions, $allObstacles, $logger);
+	}
+	else{ //just free path
+		$action = runRandom($moveAvailable, $typeOfObstacle, $allActions, $allObstacles, $logger);
+	}
+
+	return [
+		'action' => $action,
+		'thereIsABomb' => $thereIsABomb,
+		'typeOfObstacle' => $typeOfObstacle,
+		'moveAvailable' => $moveAvailable
+	];
+}
+
+
+function runFromBomb($moveAvailable, $typeOfObstacle, $allActions, $allObstacles, $game, $logger)
+{
+	$obstacleDirections = array_keys($typeOfObstacle, $allObstacles["bomb"]);
+	
+	$bombDirection = $obstacleDirections[0];
+
+	//remove bomb direction from available directions
+	unset($moveAvailable[$bombDirection]);
+	
+	//sort direction from that with less step available to that with the most steps available
+	asort($moveAvailable);
+
+	//point to direction with more steps available
+	end($moveAvailable);
+	
+	$directionMove = key($moveAvailable);
+
+	//move away from bomb 
+	$action = $allActions[$directionMove];
+	return $action;
+}
+function huntOpponent($moveAvailable, $typeOfObstacle, $allActions, $allObstacles, $logger)
+{
+	$obstacleDirections = array_keys($typeOfObstacle, $allObstacles["opponent"]);
+	$direction = $obstacleDirections[0];
+	
+	if($moveAvailable[$direction] > 2){
+		//move toward 
+		$action = $allActions[$direction];
+	}
+	else{
+		//drop bomb
+		$action = $allActions[5];
+	}
+	
+	return $action;
+}
+function destroyBlock($moveAvailable, $typeOfObstacle, $allActions, $allObstacles, $logger)
+{
+	$obstacleDirections = array_keys($typeOfObstacle, $allObstacles["destroyable_block"]);
+	
+	$direction = $obstacleDirections[0];
+	
+//	$logger->info('block to destroy');
+
+	if($moveAvailable[$direction] > 0)
+	{
+		//move toward 
+		$action = $allActions[$direction];
+	}
+	else{
+		//drop bomb
+		$action = $allActions[5];
+	}
+	
+	return $action;
+}
+function runRandom($moveAvailable, $typeOfObstacle, $allActions, $allObstacles, $logger)
+{
+//	$logger->info('runRandom');
+
+	//drop bomb
+	$action = $allActions[5];
+	
+	return $action;
+}
+
+
+/**
+ * Analize what is in sight in four directions. 
+ * Return an array with obstacles and move available (how much steps) for each direction
+ */
+function getCoordinatesInfo($myPositionX, $myPositionY, $game, $map, $bombs, $opponents, $bonuses)
+{
+	$oneUp = $myPositionY - 1;
+	$oneDown = $myPositionY + 1;
+	$oneLeft = $myPositionX - 1;
+	$oneRight = $myPositionX + 1;
+	
+	$typeOfObstacle = [];
+	$moveAvailable = [];
+
+	//check four directions
+	//up
+	$moveAvailable[0] = 0;
+	if(!empty($map[$myPositionX][$oneUp]))
+	{
+		for($up = $oneUp; $up >= 0; $up--)
+		{
+			$elementInPositionToEvaluate = $map[$myPositionX][$up];
+			
+			$isABomb = $bombs[$myPositionX][$up] === 1;
+			$isAnOpponent = !empty($opponents[$myPositionX][$up]);
+			$isABonus = !empty($bonuses[$myPositionX][$up]);
+			
+			$typeOfObstacle[0] = getTypeOfObstacle($elementInPositionToEvaluate, $isABomb, $isAnOpponent);
+			
+			if(!empty($typeOfObstacle[0])){
+				break;
+			}
+			
+			$moveAvailable[0]++;
+		}
+		if(empty($typeOfObstacle[0])){
+			$typeOfObstacle[0] = 1; //end grid
+		}
+	}
+	
+	//right
+	$moveAvailable[1] = 0;
+	if(!empty( $map[$oneRight][$myPositionY]))
+	{
+		for($right = $oneRight; $right < $game->state->width; $right++)
+		{
+			$elementInPositionToEvaluate = $map[$right][$myPositionY];
+			
+			$isABomb = !empty($bombs[$right][$myPositionY]);
+			$isAnOpponent = !empty($opponents[$right][$myPositionY]);
+			$isABonus = !empty($bonuses[$right][$myPositionY]);
+			
+			$typeOfObstacle[1] = getTypeOfObstacle($elementInPositionToEvaluate, $isABomb, $isAnOpponent);
+			
+			if(!empty($typeOfObstacle[1])){
+				break;
+			}
+			
+			$moveAvailable[1]++;
+		}
+		if(empty($typeOfObstacle[1])){
+			$typeOfObstacle[1] = 1; //end grid
+		}
+	}
+
+	//down
+	$moveAvailable[2] = 0;
+	if(!empty($map[$myPositionX][$oneDown]))
+	{
+		for($down = $oneDown; $down < $game->state->height; $down++)
+		{
+			$elementInPositionToEvaluate = $map[$myPositionX][$down];
+			
+			$isABomb = !empty($bombs[$myPositionX][$down]);
+			$isAnOpponent = !empty($opponents[$myPositionX][$down]);
+			$isABonus = !empty($bonuses[$myPositionX][$down]);
+			
+			$typeOfObstacle[2] = getTypeOfObstacle($elementInPositionToEvaluate, $isABomb, $isAnOpponent);
+			
+			if(!empty($typeOfObstacle[2])){
+				break;
+			}
+			
+			$moveAvailable[2]++;
+		}
+		if(empty($typeOfObstacle[2])){
+			$typeOfObstacle[2] = 1; //end grid
+		}
+	}
+	
+	//left
+	$moveAvailable[3] = 0;
+	if(!empty($map[$oneLeft][$myPositionY]))
+	{
+		for($left = $oneLeft; $left >= 0; $left--)
+		{
+			$elementInPositionToEvaluate = $map[$left][$myPositionY];
+			
+			$isABomb = !empty($bombs[$left][$myPositionY]);
+			$isAnOpponent = !empty($opponents[$left][$myPositionY]);
+			$isABonus = !empty($bonuses[$left][$myPositionY]);
+			
+			$typeOfObstacle[3] = getTypeOfObstacle($elementInPositionToEvaluate, $isABomb, $isAnOpponent);
+			
+			if(!empty($typeOfObstacle[3])){
+				break;
+			}
+			
+			$moveAvailable[3]++;
+		}
+		if(empty($typeOfObstacle[3])){
+			$typeOfObstacle[3] = 1; //end grid
+		}
+	}
+
+	return [
+		"moveAvailable" => $moveAvailable,
+		"typeOfObstacle" => $typeOfObstacle
+	];
+}
+
+function getTypeOfObstacle($elementInPositionToEvaluate, $isABomb, $isAnOpponent)
+{
+	$typeOfObstacle = null; 
+	//end of grid or obstacle
+	if(	$elementInPositionToEvaluate === Constants::TILE_OUT_OF_BOUNDS ){   //end grid
+		$typeOfObstacle = 1;
+	}
+	if(	$elementInPositionToEvaluate === Constants::TILE_BLOCK ){   //destroyable block
+		$typeOfObstacle = 2;
+	}
+	if(	$elementInPositionToEvaluate === Constants::TILE_WALL ){   //undestroyable block
+		$typeOfObstacle = 3;
+	}
+	if(	$elementInPositionToEvaluate === Constants::TILE_EXPLOSION ){  //exploding bomb
+		$typeOfObstacle = 4;
+	}
+	if(	$isABomb ){   
+		$typeOfObstacle = 5;
+	}
+	if(	$isAnOpponent ){  
+		$typeOfObstacle = 6;
+	}
+	return $typeOfObstacle;
+}
