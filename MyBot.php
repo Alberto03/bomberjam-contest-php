@@ -94,6 +94,8 @@ do {
 		$myPositionY = $game->myPlayer->y;
 		
 		$action = null;
+		$directionToAvoid = false;
+
 		$nextActionInfo = getNextAction(
 			$myPositionX, 
 			$myPositionY, 
@@ -104,89 +106,11 @@ do {
 			$bonuses,
 			$allObstacles,
 			$allActions,
-			$logger
+			$logger,
+			$directionToAvoid
 		);
 		
 		$action = $nextActionInfo['action'];
-
-		//TODO seeTheFuture. calc next step and see if in that path there is a bomb in sight. If so, exclude the step and re-elaborate next step
-		
-		/**
-		 * 1) analize elaborated action. If is a step in X direction, calc coordinates of that step. If is not a step, no further operation required
-		 * 2) with the coordinates of next step, check if there is a bomb in sight, his direction and how much steps to reach it.
-		 * 3) if there is a bomb, get Bomb object with the coordinates you have.
-		 * 4) Check his range, and if the path will explode, or if the path is not reached by the explosion
-		 * 5) No path explosion? Go further. Bomb will blow up my player? So the direction of the action do not have to be taken: calc new action, passing the direction to avoid in the parameter function
-		 */
-		$isAMoveAction = key($action) < 4;
-
-		if($isAMoveAction){
-			$newCoordinates = [$myPositionX, $myPositionY];
-			switch($action)
-			{
-				case 0:	//up
-					$newCoordinates[1]--;
-					break;
-				case 1: //right
-					$newCoordinates[0]++;
-					break;
-				case 2: //down 
-					$newCoordinates[1]++;
-					break;
-				case 3: //left
-					$newCoordinates[0]--;
-					break;
-			}
-
-			$bombInSight = getNextAction(
-				$newCoordinates[0], 
-				$newCoordinates[1], 
-				$game, 
-				$map, 
-				$bombs,
-				$opponents, 
-				$bonuses,
-				$allObstacles,
-				$allActions,
-				$logger
-			);
-
-			$thereIsABomb = $bombInSight['thereIsABomb'];
-			
-			if($thereIsABomb){
-				$obstacleDirections = array_keys($bombInSight['typeOfObstacle'], $allObstacles["bomb"]);
-				$bombDirection = $obstacleDirections[0];
-				$stepsToBomb = $bombInSight['moveAvailable'][$bombDirection];
-
-				switch($bombDirection){
-					case 0:	//up
-						$newCoordinates[1] = $newCoordinates[1] - $stepsToBomb;
-						break;
-					case 1: //right
-						$newCoordinates[0] = $newCoordinates[0] + $stepsToBomb;
-						break;
-					case 2: //down 
-						$newCoordinates[1] = $newCoordinates[1] + $stepsToBomb;
-						break;
-					case 3: //left
-						$newCoordinates[0] = $newCoordinates[0] - $stepsToBomb;
-						break;
-				}
-
-				$bombToAvoid = $game->state->findActiveBombAt($newCoordinates[0], $newCoordinates[1]);
-				$bombRange = $bombToAvoid->range;
-
-				$logger->info("bomb direction: ".$bombDirection."; steps to bomb: ".$stepsToBomb."; bomb range: ".$bombRange);
-			}
-
-		}
-
-
-		//calc new position. Check for bombs 
-
-
-		//TODO check if suddenDeath is active and avoid borders
-
 		
         if ($game->myPlayer->bombsLeft > 0) {
             // TODO you can drop a bomb
@@ -205,9 +129,8 @@ do {
 } while ($game->myPlayer->isAlive && !$game->state->isFinished);
 
 
-
-
-function getNextAction($myPositionX, $myPositionY, $game, $map, $bombs, $opponents, $bonuses, $allObstacles, $allActions, $logger)
+//TODO take in count directionToAvoid
+function getNextAction($myPositionX, $myPositionY, $game, $map, $bombs, $opponents, $bonuses, $allObstacles, $allActions, $logger, $directionToAvoid = null)
 {
 	$thereIsABomb = false;
 	$coordinatesInfo = getCoordinatesInfo($myPositionX, $myPositionY, $game, $map, $bombs, $opponents, $bonuses);
@@ -225,7 +148,7 @@ function getNextAction($myPositionX, $myPositionY, $game, $map, $bombs, $opponen
 	}
 	elseif(in_array($allObstacles["destroyable_block"], $typeOfObstacle)) //destroyable block discovered
 	{
-		$action = destroyBlock($moveAvailable, $typeOfObstacle, $allActions, $allObstacles, $logger);
+		$action = destroyBlock($moveAvailable, $typeOfObstacle, $allActions, $allObstacles, $logger, $directionToAvoid);
 	}
 	else{ //just free path
 		$action = runRandom($moveAvailable, $typeOfObstacle, $allActions, $allObstacles, $logger);
@@ -239,17 +162,15 @@ function getNextAction($myPositionX, $myPositionY, $game, $map, $bombs, $opponen
 	];
 }
 
-
 function runFromBomb($moveAvailable, $typeOfObstacle, $allActions, $allObstacles, $game, $logger)
 {
 	$obstacleDirections = array_keys($typeOfObstacle, $allObstacles["bomb"]);
-	
 	$bombDirection = $obstacleDirections[0];
 
 	//remove bomb direction from available directions
 	unset($moveAvailable[$bombDirection]);
 	
-	//sort direction from that with less step available to that with the most steps available
+	//sort direction from that with less step available to that with most steps available
 	asort($moveAvailable);
 
 	//point to direction with more steps available
@@ -277,8 +198,13 @@ function huntOpponent($moveAvailable, $typeOfObstacle, $allActions, $allObstacle
 	
 	return $action;
 }
-function destroyBlock($moveAvailable, $typeOfObstacle, $allActions, $allObstacles, $logger)
+function destroyBlock($moveAvailable, $typeOfObstacle, $allActions, $allObstacles, $logger, $directionToAvoid)
 {
+	if($directionToAvoid){
+		return $allActions[4];
+	}
+
+
 	$obstacleDirections = array_keys($typeOfObstacle, $allObstacles["destroyable_block"]);
 	
 	$direction = $obstacleDirections[0];
